@@ -1,11 +1,9 @@
-"""
-
-"""
-
 import asyncio
 import sys
 import select
 import json
+import queue
+import threading
 
 
 class CommandOpcodes():
@@ -24,24 +22,50 @@ class ConfirmOpcodes():
     GAME_CMD = b"\x04"
     GAME_END = b"\x05"
 
-async def read_msg(stream=sys.stdin.buffer):
-    async def read(length):
-        res = []
-        while len(res) < length:
-            await asyncio.sleep(0)
+
+async def _no_select_read(length, stream):
+    if not hasattr(stream, "read_data"):
+        stream.read_data = [queue.Queue(), True]
+
+        def write_out():
+            while stream.read_data[1]:
+                stream.read_data[0].put(stream.read(1))
+        threading.Thread(target=write_out).start()
+    res = []
+    while len(res) < length:
+        await asyncio.sleep(0)
+        try:
+            res.append(stream.read_data[0].get_nowait())
+        except queue.Empty:
+            continue
+    return b"".join(res)
+
+
+async def _read(length, stream):
+    res = []
+    while len(res) < length:
+        await asyncio.sleep(0)
+        try:
             if not select.select([stream], [], [], 0)[0]:
                 continue
-            res.extend(stream.read1(length - len(res)))
-        return bytes(res)
+        except OSError:  # select doesnt work, replace with one that does
+            global _read
+            _read = _no_select_read
+            return await _read(length, stream)
 
+        res.extend(stream.read1(length - len(res)))
+    return bytes(res)
+
+
+async def read_msg(stream=sys.stdin.buffer):
     async def read_num():
         size = 1
         while True:
-            num = int.from_bytes(await read(size), "little")
+            num = int.from_bytes(await _read(size, stream), "little")
             if num != (1 << (8 * size)) - 1:
                 return num
 
-    return [await read(await read_num())
+    return [await _read(await read_num(), stream)
             for count in range(await read_num())]
 
 
